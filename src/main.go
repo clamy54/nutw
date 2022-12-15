@@ -186,12 +186,20 @@ func (p *program) run() {
 		if server != "" {
 			url = server + ":" + strconv.Itoa(port)
 		} else {
-			hlog.Error(eventID, "No upsd server defined in config file. Please set server variable")
+			err := "No upsd server defined in config file. Please set server variable"
+			hlog.Error(eventID, err)
+			if debugmode {
+				log.Println(err)
+			}
 			os.Exit(1)
 		}
 
 		if upsname == "" {
-			hlog.Error(eventID, "No ups defined in config file. Please set upsname variable")
+			err := "No ups defined in config file. Please set upsname variable"
+			hlog.Error(eventID, err)
+			if debugmode {
+				log.Println(err)
+			}
 			os.Exit(1)
 		}
 		// Connect to the ups
@@ -199,7 +207,11 @@ func (p *program) run() {
 		c, err := nutclient.Dial(url)
 		if err != nil {
 			if !canconnect {
-				hlog.Error(eventID, "Cannot connect to upsd server : "+err.Error())
+				outtxt := "Cannot connect to upsd server : " + err.Error()
+				hlog.Error(eventID, outtxt)
+				if debugmode {
+					log.Println(outtxt)
+				}
 				// only exit if first connect fail. Else retry (may be an upsd maintenance)
 				os.Exit(1)
 			} else {
@@ -207,6 +219,10 @@ func (p *program) run() {
 			}
 		} else {
 			canconnect = true
+
+			if debugmode {
+				fmt.Printf("Connected to %s", url)
+			}
 
 			// if tls set to 1, initiate tls session
 
@@ -217,16 +233,29 @@ func (p *program) run() {
 				}
 				err = c.StartTLS(tlsconfig)
 				if err != nil {
-					hlog.Error(eventID, "Cannot start TLS session : "+err.Error())
+					outtxt := "Cannot start TLS session : " + err.Error()
+					hlog.Error(eventID, outtxt)
+					if debugmode {
+						log.Println(outtxt)
+					}
 					os.Exit(1)
 				}
+				if debugmode {
+					fmt.Print(" in SSL")
+				}
 			}
-
+			if debugmode {
+				fmt.Print("\n")
+			}
 			if login != "" && password != "" {
 				// Authenticate against nut server
 				err = c.Auth(login, password)
 				if err != nil {
-					hlog.Error(eventID, "Auth error  : "+err.Error())
+					outtxt := "Auth error  : " + err.Error()
+					hlog.Error(eventID, outtxt)
+					if debugmode {
+						log.Println(outtxt)
+					}
 					os.Exit(1)
 				}
 			}
@@ -234,8 +263,28 @@ func (p *program) run() {
 			// Select default ups
 			err = c.Login(upsname)
 			if err != nil {
-				hlog.Error(eventID, "Cannot select ups "+upsname+" : "+err.Error())
+				outtxt := "Cannot select ups " + upsname + " : " + err.Error()
+				hlog.Error(eventID, outtxt)
+				if debugmode {
+					log.Println(outtxt)
+				}
 				os.Exit(1)
+			}
+			if debugmode {
+				fmt.Printf("Using \"%s\" as current UPS :\n", upsname)
+			}
+
+			// if in debugmode, show ups informations
+			if debugmode {
+				params, err := c.GetUpsVars()
+				if err == nil {
+					for _, value := range params {
+						dataparam, _ := c.GetData(value)
+						fmt.Printf("%s : \"%v\" \n", value, dataparam)
+					}
+				} else {
+					log.Println("Cannot fetch ups vars")
+				}
 			}
 
 			cancharge = true
