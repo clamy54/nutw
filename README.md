@@ -76,5 +76,12 @@ Some modes requires Administrator privileges.
 
 ## Credits
 
+Changelog :
+
+v1.1 - Debug mode is now more verbose on default console
+v1.0 - Initial release
+
+## Credits
+
 Nutw use [Kardianos Service module](https://github.com/kardianos/service).
 
