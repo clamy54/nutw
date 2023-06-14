@@ -304,7 +304,9 @@ func (p *program) run() {
 			online, err = c.IsOnline()
 			if err != nil {
 				hlog.Error(eventID, "Cannot get online status for ups "+upsname+" : "+err.Error())
-				os.Exit(1)
+				if !wasonline {
+					os.Exit(1)
+				}
 			}
 
 			if online && !wasonline {
@@ -315,7 +317,9 @@ func (p *program) run() {
 			onbattery, err = c.IsOnBattery()
 			if err != nil {
 				hlog.Error(eventID, "Cannot get online status for ups "+upsname+" : "+err.Error())
-				os.Exit(1)
+				if !wasonline {
+					os.Exit(1)
+				}
 			}
 
 			if onbattery && !wasonline {
@@ -479,7 +483,7 @@ func main() {
 		// if no args specified
 		if mode == "" {
 			fmt.Fprintf(os.Stderr,
-				"%s \n(c)2022 Cyril LAMY\n\n"+
+				"%s \n(c)2022-2023 Cyril LAMY\n\n"+
 					"usage: %s --mode=[install,uninstall,debug,start,stop]\n"+
 					"       install: install and start service (automatic startup at boot enabled) \n"+
 					"       uninstall: stop and uninstall service\n"+
