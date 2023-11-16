@@ -135,11 +135,11 @@ func (p *program) run() {
 	// Variables
 	var url string
 	var charge, chargelow int
-	var cancharge, online, onbattery, wasonline, canconnect bool
+	var cancharge, online, onbattery, wasonline, canconnect, looseconnect bool
 	var err error
 
 	canconnect = false
-
+	looseconnect = false
 	// Setup logger (in run manually before service installed)
 
 	_ = eventlog.InstallAsEventCreate(serviceName, eventlog.Info|eventlog.Warning|eventlog.Error)
@@ -304,6 +304,7 @@ func (p *program) run() {
 			online, err = c.IsOnline()
 			if err != nil {
 				hlog.Error(eventID, "Cannot get online status for ups "+upsname+" : "+err.Error())
+				looseconnect = true
 				if !wasonline {
 					os.Exit(1)
 				}
@@ -314,9 +315,15 @@ func (p *program) run() {
 				wasonline = true
 			}
 
+			if online && looseconnect {
+				hlog.Info(eventID, "Ups "+upsname+" is back online")
+				looseconnect = false
+			}
+
 			onbattery, err = c.IsOnBattery()
 			if err != nil {
 				hlog.Error(eventID, "Cannot get online status for ups "+upsname+" : "+err.Error())
+				looseconnect = true
 				if !wasonline {
 					os.Exit(1)
 				}
@@ -324,6 +331,11 @@ func (p *program) run() {
 
 			if onbattery && !wasonline {
 				hlog.Warning(eventID, "Ups "+upsname+" is on battery but never seen it online - skipping shutdown (maybe voluntary restart ?) ")
+			}
+
+			if onbattery && looseconnect {
+				hlog.Info(eventID, "Ups "+upsname+" is back on battery mode")
+				looseconnect = false
 			}
 
 			if wasonline {
