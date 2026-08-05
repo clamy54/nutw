@@ -102,7 +102,31 @@ The installer is written to dist\nutw-install.exe .
 
 ## Changelog
 
+v2.0 :
+
+* The service does not stop anymore when the ups becomes unreachable. Any failed probe is now
+  logged and retried at the next interval, whatever the reason : upsd maintenance, ups firmware
+  update, switch reload or network outage
+* Losing contact with the ups cannot shutdown the machine anymore. The previous version kept the
+  values read during the previous probe when a read failed, so an outage happening right after
+  the ups went on battery could shutdown a machine that was still powered
+* The low battery flag (LB) raised by the ups is now honoured, whatever the reported charge is.
+  It takes the ageing of the battery into account, which a fixed percentage threshold ignores
+* Battery levels are read again on the ups reporting them as floating point values, such as
+  "100.0". They were previously rejected, which silently disabled the low charge threshold and
+  shut the machine down at the first power outage
+* A service stop request is honoured right away instead of being noticed up to interval seconds
+  later, which made the service manager give up
+* The installer now asks for the settings and writes nutw.ini, and can install and start the
+  service. It also keeps the settings of a previous installation
+* The installer is published on the releases page and built by GitHub Actions
+
+v1.3 - Do not exit the service immediately when the ups goes offline, log the connection losses
+
+v1.2 - Build using nutclient v1.0.2, do not overwrite an existing ini file at install
+
 v1.1 - Debug mode is now more verbose on default console
+
 v1.0 - Initial release
 
 ## Credits
