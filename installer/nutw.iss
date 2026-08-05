@@ -75,44 +75,57 @@ Filename: "{app}\{#AppExeName}"; Parameters: "--mode=uninstall"; RunOnceId: "rem
 Type: files; Name: "{app}\nutw.ini"
 
 [Code]
+// The settings are split over two pages : a wizard page cannot show more
+// than five fields without the last one falling below the bottom of the
+// window, which cannot be resized.
 var
-  CfgPage: TInputQueryWizardPage;
+  SrvPage: TInputQueryWizardPage;
+  AuthPage: TInputQueryWizardPage;
   UseTlsBox: TNewCheckBox;
 
 const
   FieldServer = 0;
   FieldPort = 1;
   FieldUpsName = 2;
-  FieldLogin = 3;
-  FieldPassword = 4;
-  FieldInterval = 5;
+
+  FieldLogin = 0;
+  FieldPassword = 1;
+  FieldInterval = 2;
 
 procedure InitializeWizard;
 begin
-  CfgPage := CreateInputQueryPage(wpSelectDir,
+  SrvPage := CreateInputQueryPage(wpSelectDir,
     'Nut server',
     'Which upsd daemon should Nutw probe ?',
     'These settings are written to nutw.ini in the installation folder, ' +
     'where they can be edited later on.');
 
-  CfgPage.Add('Server (hostname or ip address) :', False);
-  CfgPage.Add('Port :', False);
-  CfgPage.Add('Ups name, as served by the upsd daemon :', False);
-  CfgPage.Add('Login (leave empty if the daemon needs no authentication) :', False);
-  CfgPage.Add('Password :', True);
-  CfgPage.Add('Amount of time between two probes (seconds) :', False);
+  SrvPage.Add('Server (hostname or ip address) :', False);
+  SrvPage.Add('Port :', False);
+  SrvPage.Add('Ups name, as served by the upsd daemon :', False);
 
-  CfgPage.Values[FieldPort] := '3493';
-  CfgPage.Values[FieldInterval] := '60';
+  SrvPage.Values[FieldPort] := '3493';
 
-  UseTlsBox := TNewCheckBox.Create(CfgPage);
-  UseTlsBox.Parent := CfgPage.Surface;
-  UseTlsBox.Left := CfgPage.Edits[FieldInterval].Left;
-  UseTlsBox.Top := CfgPage.Edits[FieldInterval].Top +
-    CfgPage.Edits[FieldInterval].Height + ScaleY(14);
-  UseTlsBox.Width := CfgPage.SurfaceWidth - UseTlsBox.Left;
+  UseTlsBox := TNewCheckBox.Create(SrvPage);
+  UseTlsBox.Parent := SrvPage.Surface;
+  UseTlsBox.Left := SrvPage.Edits[FieldUpsName].Left;
+  UseTlsBox.Top := SrvPage.Edits[FieldUpsName].Top +
+    SrvPage.Edits[FieldUpsName].Height + ScaleY(16);
+  UseTlsBox.Width := SrvPage.SurfaceWidth - UseTlsBox.Left;
   UseTlsBox.Height := ScaleY(17);
   UseTlsBox.Caption := 'Talk to the upsd daemon over a TLS session';
+
+  AuthPage := CreateInputQueryPage(SrvPage.ID,
+    'Nut server',
+    'How should Nutw log in, and how often should it probe ?',
+    'Leave the login and the password empty if the upsd daemon needs no ' +
+    'authentication.');
+
+  AuthPage.Add('Login :', False);
+  AuthPage.Add('Password :', True);
+  AuthPage.Add('Amount of time between two probes (seconds) :', False);
+
+  AuthPage.Values[FieldInterval] := '60';
 end;
 
 function IsNumeric(Value: String): Boolean;
@@ -132,7 +145,7 @@ procedure CurPageChanged(CurPageID: Integer);
 var
   IniFile: String;
 begin
-  if CurPageID <> CfgPage.ID then
+  if CurPageID <> SrvPage.ID then
     Exit;
 
   IniFile := ExpandConstant('{app}\nutw.ini');
@@ -140,55 +153,59 @@ begin
   if not FileExists(IniFile) then
     Exit;
 
-  CfgPage.Values[FieldServer] := GetIniString('nutd', 'server', CfgPage.Values[FieldServer], IniFile);
-  CfgPage.Values[FieldPort] := GetIniString('nutd', 'port', CfgPage.Values[FieldPort], IniFile);
-  CfgPage.Values[FieldUpsName] := GetIniString('nutd', 'upsname', CfgPage.Values[FieldUpsName], IniFile);
-  CfgPage.Values[FieldLogin] := GetIniString('nutd', 'login', CfgPage.Values[FieldLogin], IniFile);
-  CfgPage.Values[FieldPassword] := GetIniString('nutd', 'password', CfgPage.Values[FieldPassword], IniFile);
-  CfgPage.Values[FieldInterval] := GetIniString('nutd', 'interval', CfgPage.Values[FieldInterval], IniFile);
+  SrvPage.Values[FieldServer] := GetIniString('nutd', 'server', SrvPage.Values[FieldServer], IniFile);
+  SrvPage.Values[FieldPort] := GetIniString('nutd', 'port', SrvPage.Values[FieldPort], IniFile);
+  SrvPage.Values[FieldUpsName] := GetIniString('nutd', 'upsname', SrvPage.Values[FieldUpsName], IniFile);
   UseTlsBox.Checked := GetIniString('nutd', 'usetls', '0', IniFile) = '1';
+
+  AuthPage.Values[FieldLogin] := GetIniString('nutd', 'login', AuthPage.Values[FieldLogin], IniFile);
+  AuthPage.Values[FieldPassword] := GetIniString('nutd', 'password', AuthPage.Values[FieldPassword], IniFile);
+  AuthPage.Values[FieldInterval] := GetIniString('nutd', 'interval', AuthPage.Values[FieldInterval], IniFile);
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
 
-  if CurPageID <> CfgPage.ID then
-    Exit;
-
-  if Trim(CfgPage.Values[FieldServer]) = '' then
+  if CurPageID = SrvPage.ID then
   begin
-    MsgBox('Please enter the hostname or the ip address of the upsd server.', mbError, MB_OK);
-    Result := False;
-    Exit;
+    if Trim(SrvPage.Values[FieldServer]) = '' then
+    begin
+      MsgBox('Please enter the hostname or the ip address of the upsd server.', mbError, MB_OK);
+      Result := False;
+      Exit;
+    end;
+
+    if Trim(SrvPage.Values[FieldUpsName]) = '' then
+    begin
+      MsgBox('Please enter the name of the ups, as served by the upsd daemon.', mbError, MB_OK);
+      Result := False;
+      Exit;
+    end;
+
+    if not IsNumeric(Trim(SrvPage.Values[FieldPort])) then
+    begin
+      MsgBox('The port must be a number.', mbError, MB_OK);
+      Result := False;
+      Exit;
+    end;
   end;
 
-  if Trim(CfgPage.Values[FieldUpsName]) = '' then
+  if CurPageID = AuthPage.ID then
   begin
-    MsgBox('Please enter the name of the ups, as served by the upsd daemon.', mbError, MB_OK);
-    Result := False;
-    Exit;
-  end;
+    if not IsNumeric(Trim(AuthPage.Values[FieldInterval])) then
+    begin
+      MsgBox('The interval must be a number of seconds.', mbError, MB_OK);
+      Result := False;
+      Exit;
+    end;
 
-  if not IsNumeric(Trim(CfgPage.Values[FieldPort])) then
-  begin
-    MsgBox('The port must be a number.', mbError, MB_OK);
-    Result := False;
-    Exit;
-  end;
-
-  if not IsNumeric(Trim(CfgPage.Values[FieldInterval])) then
-  begin
-    MsgBox('The interval must be a number of seconds.', mbError, MB_OK);
-    Result := False;
-    Exit;
-  end;
-
-  if StrToInt(Trim(CfgPage.Values[FieldInterval])) < 10 then
-  begin
-    MsgBox('Nutw does not probe more than once every 10 seconds.', mbError, MB_OK);
-    Result := False;
-    Exit;
+    if StrToInt(Trim(AuthPage.Values[FieldInterval])) < 10 then
+    begin
+      MsgBox('Nutw does not probe more than once every 10 seconds.', mbError, MB_OK);
+      Result := False;
+      Exit;
+    end;
   end;
 end;
 
@@ -208,32 +225,32 @@ end;
 
 function GetServer(Param: String): String;
 begin
-  Result := Trim(CfgPage.Values[FieldServer]);
+  Result := Trim(SrvPage.Values[FieldServer]);
 end;
 
 function GetPort(Param: String): String;
 begin
-  Result := Trim(CfgPage.Values[FieldPort]);
+  Result := Trim(SrvPage.Values[FieldPort]);
 end;
 
 function GetUpsName(Param: String): String;
 begin
-  Result := Trim(CfgPage.Values[FieldUpsName]);
+  Result := Trim(SrvPage.Values[FieldUpsName]);
 end;
 
 function GetLogin(Param: String): String;
 begin
-  Result := Trim(CfgPage.Values[FieldLogin]);
+  Result := Trim(AuthPage.Values[FieldLogin]);
 end;
 
 function GetPassword(Param: String): String;
 begin
-  Result := CfgPage.Values[FieldPassword];
+  Result := AuthPage.Values[FieldPassword];
 end;
 
 function GetInterval(Param: String): String;
 begin
-  Result := Trim(CfgPage.Values[FieldInterval]);
+  Result := Trim(AuthPage.Values[FieldInterval]);
 end;
 
 function GetUseTls(Param: String): String;
