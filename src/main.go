@@ -19,6 +19,7 @@ package main
 
 import (
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -129,18 +130,197 @@ func shutdown() error {
 	return nil
 }
 
+// upsprobe holds the settings needed to reach the ups, and remembers what
+// has been seen during the previous probes.
+type upsprobe struct {
+	url      string
+	usetls   bool
+	login    string
+	password string
+	upsname  string
+
+	reached      bool // the ups has been probed successfully at least once
+	wasonline    bool // the ups has been seen online at least once
+	looseconnect bool // the previous probe failed
+}
+
+// configError reports a failure the upsd server itself complained about,
+// such as a bad password or an unknown ups name. Retrying will not help
+// until the ini file is fixed.
+type configError struct {
+	err error
+}
+
+func (e *configError) Error() string {
+	return e.err.Error()
+}
+
+// probe runs a single probe of the ups. It returns the reason why the
+// system has to be shut down, or an empty string when there is nothing to
+// do. A probe failure is returned as an error and is never fatal by
+// itself : the ups may just be rebooting, or a switch may be reloading
+// its firmware, which is no reason to stop the service nor to shutdown
+// the machine.
+func (u *upsprobe) probe() (string, error) {
+
+	// Connect to the ups
+	c, err := nutclient.Dial(u.url)
+	if err != nil {
+		return "", fmt.Errorf("cannot connect to upsd server : %w", err)
+	}
+
+	defer c.Close()
+
+	if debugmode {
+		fmt.Printf("Connected to %s", u.url)
+	}
+
+	// if tls set to 1, initiate tls session
+	if u.usetls {
+		tlsconfig := &tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         "localhost",
+		}
+
+		err = c.StartTLS(tlsconfig)
+		if err != nil {
+			return "", fmt.Errorf("cannot start TLS session : %w", err)
+		}
+
+		if debugmode {
+			fmt.Print(" in SSL")
+		}
+	}
+
+	if debugmode {
+		fmt.Print("\n")
+	}
+
+	if u.login != "" && u.password != "" {
+		// Authenticate against nut server
+		err = c.Auth(u.login, u.password)
+		if err != nil {
+			return "", &configError{fmt.Errorf("auth error : %w", err)}
+		}
+	}
+
+	// Select default ups
+	err = c.Login(u.upsname)
+	if err != nil {
+		return "", &configError{fmt.Errorf("cannot select ups %s : %w", u.upsname, err)}
+	}
+
+	defer c.Logout()
+
+	if debugmode {
+		fmt.Printf("Using \"%s\" as current UPS :\n", u.upsname)
+
+		// show ups informations
+		params, err := c.GetUpsVars()
+		if err == nil {
+			for _, value := range params {
+				dataparam, _ := c.GetData(value)
+				fmt.Printf("%s : \"%v\" \n", value, dataparam)
+			}
+		} else {
+			log.Println("Cannot fetch ups vars")
+		}
+	}
+
+	// Read the status before anything else : a shutdown must never be
+	// decided from the values read during a previous probe.
+	online, err := c.IsOnline()
+	if err != nil {
+		return "", fmt.Errorf("cannot get online status for ups %s : %w", u.upsname, err)
+	}
+
+	onbattery, err := c.IsOnBattery()
+	if err != nil {
+		return "", fmt.Errorf("cannot get battery status for ups %s : %w", u.upsname, err)
+	}
+
+	// The LB flag is the low battery warning raised by the ups itself, it
+	// does not depend on the battery level probes.
+	canlowbattery := true
+
+	lowbattery, err := c.IsLowBattery()
+
+	if err != nil {
+		canlowbattery = false
+	}
+
+	cancharge := true
+
+	charge, err := c.BatteryCharge()
+
+	if err != nil {
+		cancharge = false
+	}
+
+	chargelow, err := c.BatteryChargeLow()
+
+	if err != nil {
+		cancharge = false
+	}
+
+	u.reached = true
+
+	if online && !u.wasonline {
+		hlog.Info(eventID, "Ups "+u.upsname+" is online")
+		u.wasonline = true
+	}
+
+	if u.looseconnect {
+		if online {
+			hlog.Info(eventID, "Ups "+u.upsname+" is back online")
+		}
+
+		if onbattery {
+			hlog.Info(eventID, "Ups "+u.upsname+" is back on battery mode")
+		}
+
+		u.looseconnect = false
+	}
+
+	if onbattery && !u.wasonline {
+		hlog.Warning(eventID, "Ups "+u.upsname+" is on battery but never seen it online - skipping shutdown (maybe voluntary restart ?) ")
+	}
+
+	if !u.wasonline || !onbattery || online {
+		return "", nil
+	}
+
+	switch {
+	case canlowbattery && lowbattery:
+		// The ups says it is running out of power, whatever the charge
+		// level says.
+		return "Ups " + u.upsname + " reports a low battery", nil
+
+	case cancharge && charge <= chargelow:
+		return "Low Battery on " + u.upsname + " - Current charge : " + strconv.Itoa(charge) + " , Low charge level defined at : " + strconv.Itoa(chargelow), nil
+
+	case !cancharge && !canlowbattery:
+		// Neither the charge level nor the LB flag can be read, so there
+		// is no way to tell how much runtime is left : shutdown while we
+		// still can.
+		return "Ups " + u.upsname + " is on battery and reports neither its charge nor a low battery flag", nil
+
+	case cancharge:
+		hlog.Warning(eventID, "Ups "+u.upsname+" is on battery - Current charge : "+strconv.Itoa(charge)+" , Low charge level defined at : "+strconv.Itoa(chargelow))
+
+	default:
+		hlog.Warning(eventID, "Ups "+u.upsname+" is on battery - Waiting for the low battery flag")
+	}
+
+	return "", nil
+}
+
 // Main function of the service
 func (p *program) run() {
 
 	// Variables
-	var url string
-	var charge, chargelow int
-	var cancharge, canlowbattery, lowbattery bool
-	var online, onbattery, wasonline, canconnect, looseconnect bool
 	var err error
 
-	canconnect = false
-	looseconnect = false
 	// Setup logger (in run manually before service installed)
 
 	_ = eventlog.InstallAsEventCreate(serviceName, eventlog.Info|eventlog.Warning|eventlog.Error)
@@ -181,223 +361,84 @@ func (p *program) run() {
 		interval = 10
 	}
 
-	wasonline = false
+	if server == "" {
+		outtxt := "No upsd server defined in config file. Please set server variable"
+		hlog.Error(eventID, outtxt)
+		if debugmode {
+			log.Println(outtxt)
+		}
+		os.Exit(1)
+	}
+
+	if upsname == "" {
+		outtxt := "No ups defined in config file. Please set upsname variable"
+		hlog.Error(eventID, outtxt)
+		if debugmode {
+			log.Println(outtxt)
+		}
+		os.Exit(1)
+	}
+
+	ups := &upsprobe{
+		url:      server + ":" + strconv.Itoa(port),
+		usetls:   usetls == 1,
+		login:    login,
+		password: password,
+		upsname:  upsname,
+	}
 
 	for {
-		if server != "" {
-			url = server + ":" + strconv.Itoa(port)
-		} else {
-			err := "No upsd server defined in config file. Please set server variable"
-			hlog.Error(eventID, err)
-			if debugmode {
-				log.Println(err)
-			}
-			os.Exit(1)
-		}
+		reason, err := ups.probe()
 
-		if upsname == "" {
-			err := "No ups defined in config file. Please set upsname variable"
-			hlog.Error(eventID, err)
-			if debugmode {
-				log.Println(err)
-			}
-			os.Exit(1)
-		}
-		// Connect to the ups
-
-		c, err := nutclient.Dial(url)
 		if err != nil {
-			if !canconnect {
-				outtxt := "Cannot connect to upsd server : " + err.Error()
-				hlog.Error(eventID, outtxt)
+			var cfgerr *configError
+
+			if errors.As(err, &cfgerr) && !ups.reached {
+				// Upsd rejected us on the very first probe, the ini file
+				// is most likely wrong and probing again will not help.
+				// Once the ups has been reached, the same answer is
+				// treated as a temporary failure : upsd also rejects a
+				// LOGIN while its driver is restarting.
+				hlog.Error(eventID, err.Error())
 				if debugmode {
-					log.Println(outtxt)
-				}
-				// only exit if first connect fail. Else retry (may be an upsd maintenance)
-				os.Exit(1)
-			} else {
-				hlog.Warning(eventID, "Upsd server : "+err.Error()+" seems to be down ... Retrying later")
-			}
-		} else {
-			canconnect = true
-
-			if debugmode {
-				fmt.Printf("Connected to %s", url)
-			}
-
-			// if tls set to 1, initiate tls session
-
-			if usetls == 1 {
-				tlsconfig := &tls.Config{
-					InsecureSkipVerify: true,
-					ServerName:         "localhost",
-				}
-				err = c.StartTLS(tlsconfig)
-				if err != nil {
-					outtxt := "Cannot start TLS session : " + err.Error()
-					hlog.Error(eventID, outtxt)
-					if debugmode {
-						log.Println(outtxt)
-					}
-					os.Exit(1)
-				}
-				if debugmode {
-					fmt.Print(" in SSL")
-				}
-			}
-			if debugmode {
-				fmt.Print("\n")
-			}
-			if login != "" && password != "" {
-				// Authenticate against nut server
-				err = c.Auth(login, password)
-				if err != nil {
-					outtxt := "Auth error  : " + err.Error()
-					hlog.Error(eventID, outtxt)
-					if debugmode {
-						log.Println(outtxt)
-					}
-					os.Exit(1)
-				}
-			}
-
-			// Select default ups
-			err = c.Login(upsname)
-			if err != nil {
-				outtxt := "Cannot select ups " + upsname + " : " + err.Error()
-				hlog.Error(eventID, outtxt)
-				if debugmode {
-					log.Println(outtxt)
+					log.Println(err.Error())
 				}
 				os.Exit(1)
 			}
-			if debugmode {
-				fmt.Printf("Using \"%s\" as current UPS :\n", upsname)
-			}
 
-			// if in debugmode, show ups informations
-			if debugmode {
-				params, err := c.GetUpsVars()
-				if err == nil {
-					for _, value := range params {
-						dataparam, _ := c.GetData(value)
-						fmt.Printf("%s : \"%v\" \n", value, dataparam)
-					}
+			// The ups is unreachable : keep probing, it may be rebooting,
+			// under maintenance, or the network may not be up yet. Only
+			// the first failure is logged, so a long outage does not fill
+			// up the event log.
+			if !ups.looseconnect {
+				if ups.reached {
+					hlog.Warning(eventID, "Upsd server : "+err.Error()+" seems to be down ... Retrying later")
 				} else {
-					log.Println("Cannot fetch ups vars")
+					hlog.Error(eventID, "Cannot probe upsd server : "+err.Error()+" - Retrying later")
 				}
+				ups.looseconnect = true
 			}
 
-			cancharge = true
+			if debugmode {
+				log.Println(err.Error())
+			}
+		}
 
-			charge, err = c.BatteryCharge()
-
+		if reason != "" {
+			hlog.Warning(eventID, reason+". Shutting down system now !")
+			err = shutdown()
 			if err != nil {
-				cancharge = false
+				hlog.Error(eventID, "Error when trying to shutdown system : "+err.Error())
 			}
-
-			chargelow, err = c.BatteryChargeLow()
-
-			if err != nil {
-				cancharge = false
-			}
-
-			// The LB flag is the low battery warning raised by the ups
-			// itself, it does not depend on the battery level probes.
-			canlowbattery = true
-
-			lowbattery, err = c.IsLowBattery()
-
-			if err != nil {
-				canlowbattery = false
-			}
-
-			online, err = c.IsOnline()
-			if err != nil {
-				hlog.Error(eventID, "Cannot get online status for ups "+upsname+" : "+err.Error())
-				looseconnect = true
-				if !wasonline {
-					os.Exit(1)
-				}
-			}
-
-			if online && !wasonline {
-				hlog.Info(eventID, "Ups "+upsname+" is online")
-				wasonline = true
-			}
-
-			if online && looseconnect {
-				hlog.Info(eventID, "Ups "+upsname+" is back online")
-				looseconnect = false
-			}
-
-			onbattery, err = c.IsOnBattery()
-			if err != nil {
-				hlog.Error(eventID, "Cannot get online status for ups "+upsname+" : "+err.Error())
-				looseconnect = true
-				if !wasonline {
-					os.Exit(1)
-				}
-			}
-
-			if onbattery && !wasonline {
-				hlog.Warning(eventID, "Ups "+upsname+" is on battery but never seen it online - skipping shutdown (maybe voluntary restart ?) ")
-			}
-
-			if onbattery && looseconnect {
-				hlog.Info(eventID, "Ups "+upsname+" is back on battery mode")
-				looseconnect = false
-			}
-
-			if wasonline && onbattery && !online {
-				mustshutdown := false
-				reason := ""
-
-				switch {
-				case canlowbattery && lowbattery:
-					// The ups says it is running out of power, whatever
-					// the charge level says.
-					mustshutdown = true
-					reason = "Ups " + upsname + " reports a low battery"
-
-				case cancharge && charge <= chargelow:
-					mustshutdown = true
-					reason = "Low Battery on " + upsname + " - Current charge : " + strconv.Itoa(charge) + " , Low charge level defined at : " + strconv.Itoa(chargelow)
-
-				case !cancharge && !canlowbattery:
-					// Neither the charge level nor the LB flag can be
-					// read, so there is no way to tell how much runtime
-					// is left : shutdown while we still can.
-					mustshutdown = true
-					reason = "Ups " + upsname + " is on battery and reports neither its charge nor a low battery flag"
-
-				case cancharge:
-					hlog.Warning(eventID, "Ups "+upsname+" is on battery - Current charge : "+strconv.Itoa(charge)+" , Low charge level defined at : "+strconv.Itoa(chargelow))
-
-				default:
-					hlog.Warning(eventID, "Ups "+upsname+" is on battery - Waiting for the low battery flag")
-				}
-
-				if mustshutdown {
-					hlog.Warning(eventID, reason+". Shutting down system now !")
-					c.Logout()
-					c.Close()
-					err = shutdown()
-					if err != nil {
-						hlog.Error(eventID, "Error when trying to shutdown system : "+err.Error())
-						os.Exit(1)
-					}
-					os.Exit(1)
-				}
-			}
-
-			c.Logout()
-			c.Close()
+			os.Exit(1)
 		}
 
 		// if debugmode then exit at first loop
 		if debugmode {
 			hlog.Info(eventID, serviceName+" - End of debug session ")
+			if err != nil {
+				os.Exit(1)
+			}
 			os.Exit(0)
 		}
 
