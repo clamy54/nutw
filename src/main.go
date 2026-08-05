@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -46,7 +47,11 @@ const desc = "Shutdown system properly when power supply errors occur"
 type program struct{}
 
 var hlog *eventlog.Log
-var triggersvc, debugmode bool
+var debugmode bool
+
+// triggersvc is set by the service manager thread to ask the probe loop
+// to stop, so it has to be read and written atomically.
+var triggersvc atomic.Bool
 
 // Get ini file path (must be in the same directory as the .exe file)
 func getInifilePath() (string, error) {
@@ -442,14 +447,17 @@ func (p *program) run() {
 			os.Exit(0)
 		}
 
-		// exit loop it triggersvc set to true, else wait and rerun probe
-		if !triggersvc {
-			time.Sleep(time.Duration(interval) * time.Second)
-		} else {
-			hlog.Info(eventID, "Shutting down service "+serviceName)
-			os.Exit(0)
-		}
+		// Wait for the next probe, one second at a time, so a stop request
+		// is honoured right away instead of being noticed up to interval
+		// seconds later. The service manager gives up after 30 seconds.
+		for waited := 0; waited < interval; waited++ {
+			if triggersvc.Load() {
+				hlog.Info(eventID, "Shutting down service "+serviceName)
+				os.Exit(0)
+			}
 
+			time.Sleep(time.Second)
+		}
 	}
 }
 
@@ -457,14 +465,14 @@ func (p *program) run() {
 
 func (p *program) Start(s service.Service) error {
 	// Should be non-blocking, so run async using goroutine
-	triggersvc = false
+	triggersvc.Store(false)
 	go p.run()
 	return nil
 }
 
 func (p *program) Stop(s service.Service) error {
 	// Should be non-blocking
-	triggersvc = true
+	triggersvc.Store(true)
 	return nil
 }
 
@@ -547,7 +555,7 @@ func main() {
 
 		if mode == "debug" {
 			debugmode = true
-			triggersvc = true
+			triggersvc.Store(true)
 			err = s.Run()
 			if err != nil {
 				log.Fatal(err)
