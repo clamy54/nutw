@@ -135,7 +135,8 @@ func (p *program) run() {
 	// Variables
 	var url string
 	var charge, chargelow int
-	var cancharge, online, onbattery, wasonline, canconnect, looseconnect bool
+	var cancharge, canlowbattery, lowbattery bool
+	var online, onbattery, wasonline, canconnect, looseconnect bool
 	var err error
 
 	canconnect = false
@@ -301,6 +302,16 @@ func (p *program) run() {
 				cancharge = false
 			}
 
+			// The LB flag is the low battery warning raised by the ups
+			// itself, it does not depend on the battery level probes.
+			canlowbattery = true
+
+			lowbattery, err = c.IsLowBattery()
+
+			if err != nil {
+				canlowbattery = false
+			}
+
 			online, err = c.IsOnline()
 			if err != nil {
 				hlog.Error(eventID, "Cannot get online status for ups "+upsname+" : "+err.Error())
@@ -338,35 +349,45 @@ func (p *program) run() {
 				looseconnect = false
 			}
 
-			if wasonline {
-				if cancharge {
-					if onbattery && !online {
-						if charge <= chargelow {
-							hlog.Warning(eventID, "Low Battery on "+upsname+". Shutting down system now !")
-							c.Logout()
-							c.Close()
-							err = shutdown()
-							if err != nil {
-								hlog.Error(eventID, "Error when trying to shutdown system : "+err.Error())
-								os.Exit(1)
-							}
-							os.Exit(1)
-						} else {
-							hlog.Warning(eventID, "Ups "+upsname+" is on battery - Current charge : "+strconv.Itoa(charge)+" , Low charge level defined at : "+strconv.Itoa(chargelow))
-						}
-					}
-				} else {
-					if onbattery && !online {
-						hlog.Warning(eventID, "Low Battery on "+upsname+". Shutting down system now !")
-						c.Logout()
-						c.Close()
-						err = shutdown()
-						if err != nil {
-							hlog.Error(eventID, "Error when trying to shutdown system : "+err.Error())
-							os.Exit(1)
-						}
+			if wasonline && onbattery && !online {
+				mustshutdown := false
+				reason := ""
+
+				switch {
+				case canlowbattery && lowbattery:
+					// The ups says it is running out of power, whatever
+					// the charge level says.
+					mustshutdown = true
+					reason = "Ups " + upsname + " reports a low battery"
+
+				case cancharge && charge <= chargelow:
+					mustshutdown = true
+					reason = "Low Battery on " + upsname + " - Current charge : " + strconv.Itoa(charge) + " , Low charge level defined at : " + strconv.Itoa(chargelow)
+
+				case !cancharge && !canlowbattery:
+					// Neither the charge level nor the LB flag can be
+					// read, so there is no way to tell how much runtime
+					// is left : shutdown while we still can.
+					mustshutdown = true
+					reason = "Ups " + upsname + " is on battery and reports neither its charge nor a low battery flag"
+
+				case cancharge:
+					hlog.Warning(eventID, "Ups "+upsname+" is on battery - Current charge : "+strconv.Itoa(charge)+" , Low charge level defined at : "+strconv.Itoa(chargelow))
+
+				default:
+					hlog.Warning(eventID, "Ups "+upsname+" is on battery - Waiting for the low battery flag")
+				}
+
+				if mustshutdown {
+					hlog.Warning(eventID, reason+". Shutting down system now !")
+					c.Logout()
+					c.Close()
+					err = shutdown()
+					if err != nil {
+						hlog.Error(eventID, "Error when trying to shutdown system : "+err.Error())
 						os.Exit(1)
 					}
+					os.Exit(1)
 				}
 			}
 

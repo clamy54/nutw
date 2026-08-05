@@ -6,11 +6,14 @@ Nutw
 Nutw is a NUT client for Windows.
 Nutw is running as a service and probes a NUT server at regular intervals.
 
+If ups raises its low battery flag (LB), then Nutw shutdown the local OS,
+whatever the battery level is.
+
 If ups supports battery levels probes, then Nutw shutdown the local OS if
 current battery level is below low-battery level.
 
-If ups doesn't battery levels probes, then Nutw shutdown the local OS if
-ups is going on battery.
+If ups supports neither the low battery flag nor battery levels probes,
+then Nutw shutdown the local OS if ups is going on battery.
 
 ## Installation
 
